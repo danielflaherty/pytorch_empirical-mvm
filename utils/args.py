@@ -37,6 +37,13 @@ class Args(object):
         parser.add_argument("--path_output", default='./_snapshot/', type=str, required=False, 
                             help="The output directory to save checkpoint and test results.")
 
+        # For Adverserial Matching
+        parser.add_argument("--generate_new_wrong", type=str_to_bool, nargs='?', const=True, default=False)
+        parser.add_argument(
+        "--new_egoSchema_qa_path",
+        default="/home/danielflaherty/pytorch_empirical-mvm/ad_match_data/new_qa.csv"
+        )
+        
         # model
         parser.add_argument("--attn_mask_type", type=str, default="full", choices=['full', 'seq2seq'])
         parser.add_argument("--reinit_head", type=str_to_bool, nargs='?', const=True, default=False)

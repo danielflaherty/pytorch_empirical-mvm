@@ -13,7 +13,7 @@ class EncVideo(T.nn.Module):
         self.latent_feat_size = self.swin.norm.normalized_shape[0]
         self.img_feature_dim = hidden_size
         self.swinbert = getattr(args, 'swinbert', False)
-        self.max_size_frame = getattr(args, 'max_size_frame', 6)
+        self.max_size_frame = getattr(args, 'max_size_frame', 5)
         self.max_size_patch = getattr(args, 'max_size_patch', 14)
 
         if not self.swinbert:

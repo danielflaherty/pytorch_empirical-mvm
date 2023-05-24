@@ -16,6 +16,9 @@ class Dataset_QAMC(Dataset_Base):
         self.img, self.txt = img, txt[split]
         if args.data_ratio!=1: self.get_partial_data()
 
+        # For Adverserial Matching
+        self.generate_new_wrong = args.generate_new_wrong
+
     def __len__(self):
         return len(self.txt)
 
@@ -87,6 +90,7 @@ class VIOLET_QAMC(VIOLET_Base):
         _h, _w = _H//32, _W//32
 
         feat_img, mask_img, feat_txt, mask_txt = self.go_feat(img, txt.flatten(0, 1), mask.flatten(0, 1))
+        
         if self.args.num_video_tokens>-1: mask_img = self.select_vid_token(feat_img, mask_img)
 
         feat_img, mask_img = [feat_img.unsqueeze(1).expand([-1, _O, -1, -1]).flatten(0, 1), 
@@ -107,6 +111,9 @@ class Agent_QAMC(Agent_Base):
         super().__init__(args, model)
         
         self.log = {'ls_tr': [], 'ac_vl': [], 'ac_ts': []}
+        
+        # For Adverserial Matching
+        self.generate_new_wrong = args.generate_new_wrong
 
     def build_optimizer(self):
         param_optimizer = list(self.model.named_parameters())
@@ -149,9 +156,13 @@ class Agent_QAMC(Agent_Base):
             self.backward_step(ls)
             return ls.item()
         else:
-            out = T.argmax(out, dim=1)
-            ac = (out==ans).float().tolist()
-            return ac
+            if self.generate_new_wrong:
+                _, top_5_ans_idx = T.topk(out, 5, dim=1)
+                return top_5_ans_idx.float().tolist()
+            else:
+                out = T.argmax(out, dim=1)
+                ac = (out==ans).float().tolist()
+                return ac
 
     def go_dl(self, ep, dl, is_train):
         if is_train: self.model.train()

@@ -5,6 +5,9 @@ from dataset import get_tsv_dls
 from utils.args import get_args
 from utils.logger import LOGGER, add_log_to_file
 from utils.dist import NoOp, is_main_process, all_gather, get_rank, get_world_size, iter_tqdm
+import torch
+import csv
+import random
 
 class Dataset_QAMC_TSV(Dataset_QAMC):
     def __init__(self, args, img_tsv_path, txt, id2lineidx, split, tokzr=None):
@@ -15,6 +18,16 @@ class Dataset_QAMC_TSV(Dataset_QAMC):
         self.id2lineidx = id2lineidx
         if args.data_ratio!=1: self.get_partial_data()
 
+        # For Adverserial Matching
+        self.generate_new_wrong = args.generate_new_wrong
+        self.all_answers = []
+        if self.generate_new_wrong:
+            for qaw in self.txt:
+                for i in range(5):
+                    self.all_answers.append(qaw["option_{}".format(i)])
+            random.shuffle(self.all_answers)
+            self.args.size_option = len(self.all_answers)
+
     def __getitem__(self, idx):
         item = self.txt[idx]
         video_id = item['video']
@@ -24,15 +37,28 @@ class Dataset_QAMC_TSV(Dataset_QAMC):
         q = item['question']
 
         txt, mask = [], []
-        for i in range(self.args.size_option):
-            if len(q): option = q+' '+item[f'option_{i}']
-            else: option = item[f'option_{i}']
-            t, m = self.str2txt(option)
-            txt.append(t), mask.append(m)
+
+        # For Adverserial Matching: must include all potential answers, both correct & wrong
+        if self.generate_new_wrong:
+            for ans in self.all_answers:
+                if len(q): option = q + ' ' + ans
+                else: option = ans
+                t, m = self.str2txt(option)
+                txt.append(t), mask.append(m)
+            correct_ans_idx = item['answer']
+            correct_ans = item['option_{}'.format(correct_ans_idx)]
+            answer = self.all_answers.index(correct_ans)
+        else:
+            for i in range(self.args.size_option):
+                if len(q): option = q+' '+item[f'option_{i}']
+                else: option = item[f'option_{i}']
+                t, m = self.str2txt(option)
+                txt.append(t), mask.append(m)
+            answer = item['answer']
         txt = T.stack(txt)
         mask = T.stack(mask)
 
-        return img, txt, mask, item['answer']
+        return img, txt, mask, answer
 
 class Agent_QAMC_TSV(Agent_QAMC):
     def __init__(self, args, model):
@@ -49,21 +75,69 @@ class Agent_QAMC_TSV(Agent_QAMC):
             batch = self.prepare_batch(batch)
             img, txt, mask, ans = [batch[key] for key in ["img", "txt", "mask", "ans"]]
             curr_ret = self.step(img, txt, mask, ans, is_train)
-            if is_train: self.log_dict_to_wandb({"train_ls": curr_ret})
-            if isinstance(curr_ret, list): ret.extend(curr_ret)
-            else: ret.append(curr_ret)
+            if self.generate_new_wrong:
+                write_new_wrong_ans_2_csv(curr_ret, ans.tolist(), dl.dataset.all_answers, args.new_egoSchema_qa_path)
+            else:
+                if is_train: self.log_dict_to_wandb({"train_ls": curr_ret})
+                if isinstance(curr_ret, list): 
+                    ret.extend(curr_ret)
+                else: ret.append(curr_ret)
 
         if (idx%self.args.logging_steps)!=0 and is_train: LOGGER.info(self.log_memory(ep, idx+1))
 
-        gathered_ret = []
-        for ret_per_rank in all_gather(ret): gathered_ret.extend(ret_per_rank)
-        ret = float(np.average(gathered_ret))
+        if self.generate_new_wrong:
+            # return dummy accuracy in the case of performing adverserial matching
+            ret = 0.0
+        else:
+            gathered_ret = []
+            for ret_per_rank in all_gather(ret): gathered_ret.extend(ret_per_rank)
+            ret = float(np.average(gathered_ret))
 
         return ret
+    
+def write_new_wrong_ans_2_csv(wrong_ans_indices, correct_ans_indices, txt, csv_file):
+    for i in range(len(correct_ans_indices)):
+        correct_ans_idx = correct_ans_indices[i]
+        correct_answer = txt[correct_ans_idx]
+        wrong_ans_idxs = wrong_ans_indices[i]
+        answers = [txt[idx] for idx in wrong_ans_idxs]
+
+        # Check if correct answer is in top 5
+        correct_in_top_k = -1
+        for j in range(len(answers)):
+            if answers[j] == correct_answer:
+                correct_in_top_k = j
+        if correct_in_top_k == -1:
+            answers = answers[:-1]
+        else:
+            answers.pop(correct_in_top_k)
+        random.shuffle(answers)
+
+        # Save questions + new answers to CSV 
+        headers = ["correct_answer", "wrong_answer_1", "wrong_answer_2", "wrong_answer_3", "wrong_answer_4"]
+        with open(csv_file, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+
+            writer.writerow({
+                'correct_answer': correct_answer,
+                'wrong_answer_1': answers[0],
+                'wrong_answer_2': answers[1],
+                'wrong_answer_3': answers[2],
+                'wrong_answer_4': answers[3],
+            })
+            csvfile.close()
 
 if __name__=='__main__':
     args = get_args()
     tokzr = transformers.AutoTokenizer.from_pretrained(args.tokenizer)
+
+    # Set up Adverserial Matching CSV
+    if args.generate_new_wrong:
+        headers = ["correct_answer", "wrong_answer_1", "wrong_answer_2", "wrong_answer_3", "wrong_answer_4"]
+        with open(args.new_egoSchema_qa_path, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+            writer.writeheader()
+            csvfile.close()
     
     dl_tr, dl_vl, dl_ts = get_tsv_dls(args, Dataset_QAMC_TSV, tokzr=tokzr)
     print(len(dl_tr.dataset), len(dl_vl.dataset), len(dl_ts.dataset))
